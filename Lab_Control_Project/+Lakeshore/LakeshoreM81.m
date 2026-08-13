@@ -173,7 +173,7 @@ classdef LakeshoreM81 < handle
                 %else
                 %    resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance:DC?', obj.MeasureChan)));
                 %Measuring Magnitude as a diagnostic of phase misalignment
-                resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance:MAGNitude?', obj.MeasureChan)));
+                resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance?', obj.MeasureChan)));
                 %end
             catch
                 resValue = NaN;
