@@ -51,6 +51,12 @@ classdef PPMSTamarController < handle
         % Right panel
         PlotAxes
         LogTextArea
+
+        % Measurement state - tracks which channel set is currently
+        % physically connected, so the relay cold-swap cycle can be
+        % skipped when consecutive reads use the same channel set
+        % (avoids unnecessary relay chatter/transients).
+        LastClosedChannel = []
     end
 
     methods
@@ -479,6 +485,10 @@ classdef PPMSTamarController < handle
             if numChannels == 0
                 error('Experiment "%s" has no channel sets configured.', def.Name);
             end
+
+            % Force a real relay cycle on the first measurement of this
+            % experiment, regardless of what was connected before.
+            app.LastClosedChannel = [];
 
             dataFile = app.resolveExperimentDataFile(def);
             fileID = fopen(dataFile, 'w');
