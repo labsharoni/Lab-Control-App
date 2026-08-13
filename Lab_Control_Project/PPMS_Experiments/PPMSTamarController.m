@@ -586,6 +586,19 @@ classdef PPMSTamarController < handle
             app.M81.configureResistanceMode('4WIRE', 'AC');
             app.M81.setOutputState(false);
 
+            % Single-channel experiments: connect once now and leave
+            % current on the sample for the entire run, rather than
+            % cycling the relay/output on every measurement. Multi-
+            % channel experiments still cold-swap per channel as before.
+            if numChannels == 1
+                app.logMessage('Single channel configured - connecting once and keeping current on for the whole run.');
+                app.Switcher.closeChannels(def.ChannelSets{1});
+                pause(0.2);
+                app.M81.setOutputState(true);
+                pause(max(lockIn.TC * 5, 1.5));
+                app.LastClosedChannel = def.ChannelSets{1};
+            end
+
             % Ramp to start field and wait for it to stabilize.
             app.logMessage(sprintf('Ramping to start field (%.1f Oe)...', p.StartField));
             app.PPMS.setMagneticField(p.StartField, 100.0, 'Linear', 'Driven');
@@ -656,14 +669,25 @@ classdef PPMSTamarController < handle
 
                     channelTimer = tic;
 
-                    app.M81.setOutputState(false);
-                    app.Switcher.closeChannels(def.ChannelSets{c});
-                    pause(0.2);
-                    swapTime = toc(channelTimer);
+                    thisChannel = def.ChannelSets{c};
+                    skipSwap = (numChannels == 1) && ~isempty(app.LastClosedChannel);
 
-                    app.M81.setOutputState(true);
-                    settleTime = max(lockIn.TC * 5, 1.5);
-                    pause(settleTime);
+                    if skipSwap
+                        % Only one channel in this experiment and it's
+                        % already connected (either from setup, or from a
+                        % previous read) - output was never turned off,
+                        % so skip the relay cycle and settle pause.
+                        settleTime = 0;
+                    else
+                        app.M81.setOutputState(false);
+                        app.Switcher.closeChannels(thisChannel);
+                        pause(0.2);
+                        app.M81.setOutputState(true);
+                        settleTime = max(lockIn.TC * 5, 1.5);
+                        pause(settleTime);
+                        app.LastClosedChannel = thisChannel;
+                    end
+                    swapTime = toc(channelTimer);
 
                     % Read field immediately before this channel's
                     % resistance measurement, since the field keeps
