@@ -1,16 +1,30 @@
 classdef Lakeshore335 < handle
-    % Lakeshore335 - Object-Oriented MATLAB Wrapper for Lake Shore 335
-    % Designed for PT1000 sensor integration and temperature sweeping.
+    % Lakeshore335 - Object-Oriented MATLAB Wrapper for Lake Shore Model 335
+    % Temperature Controller with PT1000 / Platinum RTD support.
     
     properties (Access = private)
         VisaObj             
         IsSimulated = false 
+        DefaultInput = 'A'   % Default sensor input ('A' or 'B')
+        DefaultLoop  = 1     % Default control loop (1 or 2)
+        
+        % Simulation state memory
+        SimSetpoint = 300.0
+        SimCurrentTemp = 295.0
+        SimRamping = false
+        SimRampRate = 1.0
+        SimHeaterRange = 0
     end
     
     methods
         %% Constructor: Initialize Connection
-        function obj = Lakeshore335(resourceString)
-            % Initialize connection with an option for simulated mode
+        function obj = Lakeshore335(resourceString, defaultInput, defaultLoop)
+            if nargin < 2; defaultInput = 'A'; end
+            if nargin < 3; defaultLoop = 1; end
+            
+            obj.DefaultInput = upper(char(defaultInput));
+            obj.DefaultLoop = defaultLoop;
+            
             if strcmpi(resourceString, 'SIM')
                 obj.IsSimulated = true;
                 fprintf('[SIM] Lake Shore 335 initialized in simulation mode.\n');
@@ -19,109 +33,295 @@ classdef Lakeshore335 < handle
             
             try
                 obj.VisaObj = visadev(resourceString);
-                configureTerminator(obj.VisaObj, 'LF'); 
+                if contains(upper(resourceString), 'ASRL') || contains(upper(resourceString), 'COM')
+                    obj.VisaObj.BaudRate = 57600;
+                    obj.VisaObj.DataBits = 7;
+                    obj.VisaObj.Parity = 'odd';
+                    obj.VisaObj.StopBits = 1;
+                    obj.VisaObj.FlowControl = 'none';
+                end
+                configureTerminator(obj.VisaObj, 'CR/LF'); 
+                
                 idn = writeread(obj.VisaObj, '*IDN?');
-                fprintf('Connected to Instrument: %s\n', idn);
+                fprintf('Connected to Temperature Controller: %s\n', strtrim(idn));
             catch ME
                 error('Failed to open VISA connection to Lake Shore 335. Error: %s', ME.message);
             end
         end
         
-        %% Destructor: Safely turn off outputs on script exit
+        %% Destructor: Turn off heaters and unlock keypad
         function delete(obj)
-            % Ensure safe shutdown of hardware connections[cite: 1]
             if ~obj.IsSimulated && ~isempty(obj.VisaObj)
-                % Turn off heaters safely (Loop 1 and Loop 2)
-                obj.setHeaterRange(1, 0); 
-                obj.setHeaterRange(2, 0); 
+                try
+                    obj.setHeaterRange(0, 1); % Turn off Loop 1 heater
+                    obj.setHeaterRange(0, 2); % Turn off Loop 2 heater
+                    obj.unlockKeypad();       % Remove software keypad lock
+                catch
+                end
                 clear obj.VisaObj;
-                fprintf('Lake Shore 335 Connection closed safely.\n');
+                fprintf('Lake Shore 335 connection closed cleanly.\n');
             end
         end
-        
-        %% --- SENSOR CONFIGURATION ---
-        function configurePT1000(obj, channel)
-            % Configures the specified input channel (e.g., 'A' or 'B') for a PT1000 RTD.
-            % INTYPE params: <input>, <sensor_type>(3=Platinum), <autorange>(1=on),
-            % <range>(0), <compensation>(1=on), <units>(1=Kelvin)
+
+        %% --- KEYPAD LOCK / UNLOCK ---
+        function unlockKeypad(obj)
+            % Disable keypad lockout on the 335 front panel
             if obj.IsSimulated; return; end
-            
-            chanStr = upper(channel);
-            command = sprintf('INTYPE %s, 3, 1, 0, 1, 1', chanStr);
-            writeline(obj.VisaObj, command);
-            fprintf('Channel %s configured for PT1000 sensor.\n', chanStr);
+            writeline(obj.VisaObj, 'LOCK 0,0');
         end
         
-        %% --- TEMPERATURE CONTROL ---
-        function setRampRate(obj, loop, enable, rate)
-            % Sets the ramp rate for a specific control loop (1 or 2).
-            % enable: true (1) or false (0)
-            % rate: Kelvin per minute (0.1 to 100)
+        function lockKeypad(obj)
+            % Fully lock front panel keypad
             if obj.IsSimulated; return; end
-            
-            state = double(enable);
-            command = sprintf('RAMP %d, %d, %g', loop, state, rate);
-            writeline(obj.VisaObj, command);
+            writeline(obj.VisaObj, 'LOCK 1,0');
         end
         
-        function setTargetTemperature(obj, loop, targetTemp)
-            % Sets the setpoint temperature for the specified loop.
-            if obj.IsSimulated; return; end
+        %% --- TEMPERATURE READOUTS ---
+        function tempK = readTemp(obj, inputChan)
+            % Read temperature in Kelvin (KRDG?)
+            if nargin < 2; inputChan = obj.DefaultInput; end
+            inputChan = upper(char(inputChan));
             
-            command = sprintf('SETP %d, %g', loop, targetTemp);
-            writeline(obj.VisaObj, command);
-        end
-        
-        function setHeaterRange(obj, loop, rangeVal)
-            % Range: 0=Off, 1=Low, 2=Medium, 3=High
-            if obj.IsSimulated; return; end
-            
-            command = sprintf('RANGE %d, %d', loop, rangeVal);
-            writeline(obj.VisaObj, command);
-        end
-        
-        %% --- MEASUREMENT & POLLING ---
-        function currentTemp = readTemperature(obj, channel)
-            % Reads the current temperature of the specified channel ('A' or 'B').
             if obj.IsSimulated
-                currentTemp = 295.0 + randn()*0.05; % Return simulated room temp
+                tempK = obj.SimCurrentTemp + randn()*0.02;
                 return;
             end
             
-            chanStr = upper(channel);
-            command = sprintf('KRDG? %s', chanStr);
-            currentTemp = str2double(writeread(obj.VisaObj, command));
+            tempK = str2double(writeread(obj.VisaObj, sprintf('KRDG? %s', inputChan)));
         end
         
-        function isReached = checkTemperatureReached(obj, channel, targetTemp, tolerance)
-            % Helper method to check if the temperature is within an acceptable tolerance.
-            % Default tolerance is 0.1K if not specified.
-            if nargin < 4
-                tolerance = 0.1;
+        function tempC = readTempCelsius(obj, inputChan)
+            % Read temperature in Celsius (CRDG?)
+            if nargin < 2; inputChan = obj.DefaultInput; end
+            inputChan = upper(char(inputChan));
+            
+            if obj.IsSimulated
+                tempC = (obj.SimCurrentTemp - 273.15) + randn()*0.02;
+                return;
             end
             
-            currentTemp = obj.readTemperature(channel);
-            isReached = abs(currentTemp - targetTemp) <= tolerance;
+            tempC = str2double(writeread(obj.VisaObj, sprintf('CRDG? %s', inputChan)));
         end
         
-        function waitForTemperature(obj, channel, targetTemp, tolerance, timeoutSeconds)
-            % Blocks execution until the temperature is reached or timeout occurs.
-            if nargin < 4; tolerance = 0.1; end
-            if nargin < 5; timeoutSeconds = 600; end % Default 10 minute timeout
+        function resVal = readSensorUnits(obj, inputChan)
+            % Read raw sensor units (Ohms for PT1000, Volts for Diodes)
+            if nargin < 2; inputChan = obj.DefaultInput; end
+            inputChan = upper(char(inputChan));
             
-            fprintf('Waiting for temperature to reach %.2f K...\n', targetTemp);
+            if obj.IsSimulated
+                resVal = 1000.0 + (obj.SimCurrentTemp - 273.15)*3.85; % Approx PT1000 ohms
+                return;
+            end
             
-            tic;
-            while toc < timeoutSeconds
-                current = obj.readTemperature(channel);
-                if abs(current - targetTemp) <= tolerance
-                    fprintf('Target temperature reached: %.2f K\n', current);
-                    return;
+            resVal = str2double(writeread(obj.VisaObj, sprintf('SRDG? %s', inputChan)));
+        end
+        
+        function [tempA, tempB] = readAll(obj)
+            % Read both Channel A and Channel B temperatures in Kelvin
+            tempA = obj.readTemp('A');
+            tempB = obj.readTemp('B');
+        end
+        
+        %% --- PT1000 / SENSOR CONFIGURATION ---
+        function configurePT1000(obj, inputChan, curveNum)
+            % Configure input channel for a Platinum PT1000 RTD sensor.
+            % INTYPE params: <input>, <sensor_type=3 (Platinum RTD)>, <autorange=1>, 
+            %                <range=0>, <compensation=1 (on)>, <units=1 (Kelvin)>
+            % Standard Lake Shore DIN 43760 PT1000 curve is typically Curve 7.
+            if nargin < 2; inputChan = obj.DefaultInput; end
+            if nargin < 3; curveNum = 7; end % Default factory PT1000 curve
+            
+            inputChan = upper(char(inputChan));
+            if obj.IsSimulated; return; end
+            
+            % INTYPE: Sensor Type 3 = Platinum RTD, Autorange = 1, Compensation = 1 (current reversal), Units = 1 (K)
+            writeline(obj.VisaObj, sprintf('INTYPE %s,3,1,0,1,1', inputChan));
+            
+            % Assign temperature curve
+            if curveNum > 0
+                writeline(obj.VisaObj, sprintf('INCRV %s,%d', inputChan, curveNum));
+            end
+        end
+        
+        function setCustomCurve(obj, inputChan, curveNumber)
+            % Assign a specific curve number (0=None, 1-7=Standard, 21-59=User curves)
+            if nargin < 2; inputChan = obj.DefaultInput; end
+            if obj.IsSimulated; return; end
+            writeline(obj.VisaObj, sprintf('INCRV %s,%d', upper(char(inputChan)), curveNumber));
+        end
+        
+        %% --- SETPOINT & RAMP CONTROL ---
+        function setSetpoint(obj, targetTempK, loopNum)
+            % Set target setpoint in Kelvin
+            if nargin < 3; loopNum = obj.DefaultLoop; end
+            
+            if obj.IsSimulated
+                obj.SimSetpoint = targetTempK;
+                return;
+            end
+            
+            writeline(obj.VisaObj, sprintf('SETP %d,%g', loopNum, targetTempK));
+        end
+        
+        function spVal = getSetpoint(obj, loopNum)
+            % Query the active setpoint for a given loop
+            if nargin < 2; loopNum = obj.DefaultLoop; end
+            
+            if obj.IsSimulated; spVal = obj.SimSetpoint; return; end
+            spVal = str2double(writeread(obj.VisaObj, sprintf('SETP? %d', loopNum)));
+        end
+        
+        function setRamp(obj, enable, rateKPerMin, loopNum)
+            % Set ramp rate in Kelvin/minute and toggle ramping
+            % enable: boolean (true/false) or (1/0)
+            % rateKPerMin: rate in K/min (0.1 to 100.0)
+            if nargin < 4; loopNum = obj.DefaultLoop; end
+            
+            enableState = double(enable);
+            if obj.IsSimulated
+                obj.SimRamping = (enableState == 1);
+                obj.SimRampRate = rateKPerMin;
+                return;
+            end
+            
+            writeline(obj.VisaObj, sprintf('RAMP %d,%d,%g', loopNum, enableState, rateKPerMin));
+        end
+        
+        function [isEnabled, rateVal] = getRamp(obj, loopNum)
+            % Query ramp parameter status and rate
+            if nargin < 2; loopNum = obj.DefaultLoop; end
+            
+            if obj.IsSimulated
+                isEnabled = obj.SimRamping;
+                rateVal = obj.SimRampRate;
+                return;
+            end
+            
+            resp = strtrim(writeread(obj.VisaObj, sprintf('RAMP? %d', loopNum)));
+            tokens = sscanf(resp, '%d,%f');
+            isEnabled = logical(tokens(1));
+            rateVal = tokens(2);
+        end
+        
+        function isRampActive = isRamping(obj, loopNum)
+            % Check if the loop is actively ramping to a setpoint
+            if nargin < 2; loopNum = obj.DefaultLoop; end
+            
+            if obj.IsSimulated; isRampActive = obj.SimRamping; return; end
+            
+            statusVal = str2double(writeread(obj.VisaObj, sprintf('RAMPST? %d', loopNum)));
+            isRampActive = (statusVal == 1);
+        end
+        
+        %% --- HEATER & PID CONTROL ---
+        function setHeaterRange(obj, rangeVal, loopNum)
+            % Set output heater range:
+            % Loop 1 (Heater Output): 0 = Off, 1 = Low, 2 = Medium, 3 = High
+            % Loop 2 (Analog Output): 0 = Off, 1 = On (or 0-3 depending on power supply option)
+            % Accepts numeric index or string ('OFF', 'LOW', 'MED', 'HIGH')
+            if nargin < 3; loopNum = obj.DefaultLoop; end
+            
+            if ischar(rangeVal) || isstring(rangeVal)
+                switch upper(char(rangeVal))
+                    case 'OFF';  rangeVal = 0;
+                    case 'LOW';  rangeVal = 1;
+                    case {'MED', 'MEDIUM'}; rangeVal = 2;
+                    case 'HIGH'; rangeVal = 3;
+                    case 'ON';   rangeVal = 1;
+                    otherwise;   error('Invalid range string. Use OFF, LOW, MED, or HIGH.');
                 end
-                pause(1.0); % Poll every 1 second
             end
             
-            warning('Timeout reached before target temperature was achieved.');
+            if obj.IsSimulated
+                obj.SimHeaterRange = rangeVal;
+                return;
+            end
+            
+            writeline(obj.VisaObj, sprintf('RANGE %d,%d', loopNum, rangeVal));
+        end
+        
+        function rangeVal = getHeaterRange(obj, loopNum)
+            if nargin < 2; loopNum = obj.DefaultLoop; end
+            if obj.IsSimulated; rangeVal = obj.SimHeaterRange; return; end
+            rangeVal = str2double(writeread(obj.VisaObj, sprintf('RANGE? %d', loopNum)));
+        end
+        
+        function htrPercent = getHeaterOutput(obj, outputNum)
+            % Read current heater output percentage (HTR?)
+            if nargin < 2; outputNum = 1; end
+            
+            if obj.IsSimulated; htrPercent = 25.4 + randn()*0.5; return; end
+            htrPercent = str2double(writeread(obj.VisaObj, sprintf('HTR? %d', outputNum)));
+        end
+        
+        function setPID(obj, P, I, D, loopNum)
+            % Set PID tuning parameters for a closed loop
+            % P: Gain (0.1 to 1000)
+            % I: Integral reset (0.1 to 1000 s)
+            % D: Derivative rate (0 to 200 s)
+            if nargin < 5; loopNum = obj.DefaultLoop; end
+            if obj.IsSimulated; return; end
+            
+            writeline(obj.VisaObj, sprintf('PID %d,%g,%g,%g', loopNum, P, I, D));
+        end
+        
+        function [P, I, D] = getPID(obj, loopNum)
+            if nargin < 2; loopNum = obj.DefaultLoop; end
+            if obj.IsSimulated; P = 50; I = 20; D = 0; return; end
+            
+            resp = strtrim(writeread(obj.VisaObj, sprintf('PID? %d', loopNum)));
+            tokens = sscanf(resp, '%f,%f,%f');
+            P = tokens(1); I = tokens(2); D = tokens(3);
+        end
+        
+        function configureLoopMode(obj, loopNum, modeType, inputChan)
+            % Set output mode:
+            % modeType: 0=Off, 1=Closed Loop PID, 2=Zone, 3=Open Loop
+            % inputChan: 'A' or 'B' (or 1/2)
+            if nargin < 4; inputChan = obj.DefaultInput; end
+            
+            if ischar(inputChan) || isstring(inputChan)
+                if strcmpi(inputChan, 'A'); inCode = 1; else; inCode = 2; end
+            else
+                inCode = inputChan;
+            end
+            
+            if obj.IsSimulated; return; end
+            % OUTMODE: <loop>, <mode>, <input>, <powerup_enable=0>
+            writeline(obj.VisaObj, sprintf('OUTMODE %d,%d,%d,0', loopNum, modeType, inCode));
+        end
+        
+        function setManualOutput(obj, powerPercent, loopNum)
+            % Set manual heater output (0 - 100%) for open loop operation
+            if nargin < 3; loopNum = obj.DefaultLoop; end
+            if obj.IsSimulated; return; end
+            writeline(obj.VisaObj, sprintf('MOUT %d,%g', loopNum, powerPercent));
+        end
+        
+        %% --- UTILITY / AUTOMATION HELPERS ---
+        function isStable = waitForTemperature(obj, targetTempK, tolK, timeoutSec, inputChan)
+            % Blocking helper: waits until the temperature stays within [target - tol, target + tol]
+            if nargin < 3; tolK = 0.2; end
+            if nargin < 4; timeoutSec = 300; end
+            if nargin < 5; inputChan = obj.DefaultInput; end
+            
+            t0 = tic;
+            isStable = false;
+            stableCount = 0;
+            
+            while toc(t0) < timeoutSec
+                currentTemp = obj.readTemp(inputChan);
+                if abs(currentTemp - targetTempK) <= tolK
+                    stableCount = stableCount + 1;
+                    if stableCount >= 5 % Sustained inside tolerance for 5 checks
+                        isStable = true;
+                        return;
+                    end
+                else
+                    stableCount = 0;
+                end
+                pause(1.0);
+            end
         end
     end
 end
