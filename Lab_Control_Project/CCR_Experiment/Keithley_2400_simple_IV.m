@@ -1,7 +1,8 @@
+import Keithley.* 
 % Define the VISA address for your USB-to-GPIB connection 
 % (You can find the exact string using the visadevlist command in MATLAB)
-% gpib_address = 'GPIB0::24::INSTR'; 
-gpib_address = 'sim'; 
+ gpib_address = 'GPIB0::24::INSTR'; 
+%gpib_address = 'sim'; 
 
 % 1. Instantiate the instrument
 smu = Keithley.Keithley2400(gpib_address);

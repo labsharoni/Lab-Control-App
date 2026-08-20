@@ -1,5 +1,5 @@
-classdef DeltaSweepApp < handle
-    % DeltaSweepApp - Multi-Instrument Field Sweep & Delta Mode Controller
+classdef M81SweepApp < handle
+    % M81SweepApp - Multi-Instrument Field Sweep & M81 Controller
     
     properties
         % UI Components
@@ -15,16 +15,16 @@ classdef DeltaSweepApp < handle
         % Hardware Objects
         Magnet
         Switcher
-        DeltaMode
+        M81
     end
     
     properties (Access = private)
         % UI Handles
-        AddrDelta, AddrSwitch, AddrDaq
-        ConnectBtn, DisconnectBtn
+        AddrM81, AddrSwitch, AddrDaq
+        ConnectBtn
         
-        FieldStart, FieldEnd, FieldStepSize, FieldDelay, FieldRepeats, FieldBackForth
-        DeltaPosI, DeltaNegI, DeltaRepeats, DeltaDelay
+        FieldStart, FieldEnd, FieldSteps, FieldDelay, FieldRepeats
+        M81Current, M81Freq, M81Mode, M81Delay
         ChanPosI, ChanNegI, ChanPosV, ChanNegV
         ChannelListBox
         FilePathEdit
@@ -34,35 +34,34 @@ classdef DeltaSweepApp < handle
     end
     
     methods
-        function app = DeltaSweepApp()
-            % Construct the GUI
-            app.UIFigure = uifigure('Name', 'Delta Mode & Field Sweep Controller', 'Position', [100, 100, 1100, 800]);
+        function app = M81SweepApp()
+            % Construct the GUI[cite: 5]
+            app.UIFigure = uifigure('Name', 'M81 & Field Sweep Controller', 'Position', [100, 100, 1100, 800]);
             app.GridLayout = uigridlayout(app.UIFigure, [1, 2], 'ColumnWidth', {380, '1x'});
             
-            % Left Panel: Controls
+            % Left Panel: Controls[cite: 5]
             controlPanel = uipanel(app.GridLayout, 'Title', 'Experiment Setup');
-            controlLayout = uigridlayout(controlPanel, [8, 1], 'RowHeight', {'fit','fit','fit','fit','fit','fit','fit','1x'});
+            controlLayout = uigridlayout(controlPanel, [7, 1], 'RowHeight', {'fit','fit','fit','fit','fit','fit','1x'});
             
             app.createConnectionPanel(controlLayout);
             app.createFieldPanel(controlLayout);
-            app.createDeltaPanel(controlLayout);
+            app.createM81Panel(controlLayout);
             app.createChannelPanel(controlLayout);
             app.createFilePanel(controlLayout);
-            app.createConfigPanel(controlLayout); 
             app.createControlButtons(controlLayout);
             
-            % Right Panel: Live Plot
+            % Right Panel: Live Plot[cite: 5]
             plotPanel = uipanel(app.GridLayout, 'Title', 'Live Data');
             plotLayout = uigridlayout(plotPanel, [2, 1], 'RowHeight', {30, '1x'});
             
-            % Autoscale Toggle
+            % Autoscale Toggle[cite: 5]
             app.AutoscaleBtn = uibutton(plotLayout, 'state', 'Text', 'Autoscale ON', ...
                 'Value', true, 'ValueChangedFcn', @(src,event) app.toggleAutoscale());
             
             app.PlotAxes = uiaxes(plotLayout);
-            title(app.PlotAxes, 'Delta Voltage vs. Magnetic Field');
+            title(app.PlotAxes, 'M81 Resistance vs. Magnetic Field');
             xlabel(app.PlotAxes, 'Magnetic Field (Oe)');
-            ylabel(app.PlotAxes, 'Delta Voltage (V)');
+            ylabel(app.PlotAxes, 'Resistance (Ohms)');
             grid(app.PlotAxes, 'on');
             
             enableDefaultInteractivity(app.PlotAxes);
@@ -71,14 +70,14 @@ classdef DeltaSweepApp < handle
         %% --- UI Component Builders ---
         function createConnectionPanel(app, parent)
             p = uipanel(parent, 'Title', 'Hardware Connections');
-            g = uigridlayout(p, [4, 2], 'ColumnWidth', {'1x', '1x'});
+            g = uigridlayout(p, [4, 2], 'ColumnWidth', {100, '1x'});
             
-            uilabel(g, 'Text', '6221/2182A:'); app.AddrDelta = uieditfield(g, 'text', 'Value', 'GPIB0::12::INSTR');
+            uilabel(g, 'Text', 'M81 SSM:'); app.AddrM81 = uieditfield(g, 'text', 'Value', 'ASRL3::INSTR');
             uilabel(g, 'Text', '3706 Switch:'); app.AddrSwitch = uieditfield(g, 'text', 'Value', 'GPIB0::16::INSTR');
-            uilabel(g, 'Text', '6002 DAQ Dev:'); app.AddrDaq = uieditfield(g, 'text', 'Value', 'DEV1');
+            uilabel(g, 'Text', '6002 DAQ Dev:'); app.AddrDaq = uieditfield(g, 'text', 'Value', 'Dev1');
             
-            app.ConnectBtn = uibutton(g, 'Text', 'Connect', 'ButtonPushedFcn', @(src,event) app.connectHardware());
-            app.DisconnectBtn = uibutton(g, 'Text', 'Disconnect', 'ButtonPushedFcn', @(src,event) app.disconnectHardware(), 'Enable', 'off');
+            app.ConnectBtn = uibutton(g, 'Text', 'Connect Instruments', 'ButtonPushedFcn', @(src,event) app.connectHardware());
+            app.ConnectBtn.Layout.Column = [1 2];
         end
 
         function createFieldPanel(app, parent)
@@ -87,24 +86,19 @@ classdef DeltaSweepApp < handle
             
             uilabel(g, 'Text', 'Start (Oe):'); app.FieldStart = uieditfield(g, 'numeric', 'Value', -1000);
             uilabel(g, 'Text', 'End (Oe):');   app.FieldEnd = uieditfield(g, 'numeric', 'Value', 1000);
-            uilabel(g, 'Text', 'Step Size:');  app.FieldStepSize = uieditfield(g, 'numeric', 'Value', 50);
+            uilabel(g, 'Text', 'Steps:');      app.FieldSteps = uieditfield(g, 'numeric', 'Value', 50);
             uilabel(g, 'Text', 'Delay (s):');  app.FieldDelay = uieditfield(g, 'numeric', 'Value', 1.0);
             uilabel(g, 'Text', 'Repeats:');    app.FieldRepeats = uieditfield(g, 'numeric', 'Value', 1);
-            
-            % Checkbox spanning the correct columns (3 and 4) so it doesn't overlap
-            app.FieldBackForth = uicheckbox(g, 'Text', 'Sweep Back & Forth', 'Value', false);
-            app.FieldBackForth.Layout.Row = 3;
-            app.FieldBackForth.Layout.Column = [3 4];
         end
         
-        function createDeltaPanel(app, parent)
-            p = uipanel(parent, 'Title', 'Delta Mode Settings');
+        function createM81Panel(app, parent)
+            p = uipanel(parent, 'Title', 'M81 Measurement Settings');
             g = uigridlayout(p, [2, 4]);
             
-            uilabel(g, 'Text', '+ I (A):');    app.DeltaPosI = uieditfield(g, 'numeric', 'Value', 10e-6);
-            uilabel(g, 'Text', '- I (A):');    app.DeltaNegI = uieditfield(g, 'numeric', 'Value', -10e-6);
-            uilabel(g, 'Text', 'Repeats:');    app.DeltaRepeats = uieditfield(g, 'numeric', 'Value', 3);
-            uilabel(g, 'Text', 'Delay (s):');  app.DeltaDelay = uieditfield(g, 'numeric', 'Value', 0.1);
+            uilabel(g, 'Text', 'Excitation (A):'); app.M81Current = uieditfield(g, 'numeric', 'Value', 10e-6);
+            uilabel(g, 'Text', 'Freq (Hz):');      app.M81Freq = uieditfield(g, 'numeric', 'Value', 17.0);
+            uilabel(g, 'Text', 'Mode:');           app.M81Mode = uidropdown(g, 'Items', {'AC Lock-In', 'DC Resistance'});
+            uilabel(g, 'Text', 'Delay (s):');      app.M81Delay = uieditfield(g, 'numeric', 'Value', 2.0);
         end
         
         function createChannelPanel(app, parent)
@@ -134,125 +128,31 @@ classdef DeltaSweepApp < handle
             uibutton(g, 'Text', 'Browse', 'ButtonPushedFcn', @(src,event) app.browseFile());
         end
         
-        function createConfigPanel(app, parent)
-            p = uipanel(parent, 'Title', 'Experiment Setup Configurations');
-            g = uigridlayout(p, [1, 2]);
-            
-            uibutton(g, 'Text', 'Load Setup', 'ButtonPushedFcn', @(src,event) app.loadConfig());
-            uibutton(g, 'Text', 'Save Setup', 'ButtonPushedFcn', @(src,event) app.saveConfig());
-        end
-        
         function createControlButtons(app, parent)
             g = uigridlayout(parent, [1, 2]);
             app.RunBtn = uibutton(g, 'Text', 'RUN EXPERIMENT', 'BackgroundColor', [0.2 0.8 0.2], 'FontWeight', 'bold', 'Enable', 'off', 'ButtonPushedFcn', @(src,event) app.runExperiment());
             app.StopBtn = uibutton(g, 'Text', 'STOP', 'BackgroundColor', [0.8 0.2 0.2], 'FontWeight', 'bold', 'Enable', 'off', 'ButtonPushedFcn', @(src,event) app.stopExperiment());
         end
-        
-        %% --- Configuration Save/Load Logic ---
-        function saveConfig(app)
-            [file, path] = uiputfile('*.mat', 'Save Configuration File As');
-            if file == 0; return; end
-            
-            config = struct();
-            config.AddrDelta    = app.AddrDelta.Value;
-            config.AddrSwitch   = app.AddrSwitch.Value;
-            config.AddrDaq      = app.AddrDaq.Value;
-            config.FieldStart   = app.FieldStart.Value;
-            config.FieldEnd     = app.FieldEnd.Value;
-            config.FieldStepSize = app.FieldStepSize.Value;
-            config.FieldDelay   = app.FieldDelay.Value;
-            config.FieldRepeats = app.FieldRepeats.Value;
-            config.FieldBackForth = app.FieldBackForth.Value;
-            config.DeltaPosI    = app.DeltaPosI.Value;
-            config.DeltaNegI    = app.DeltaNegI.Value;
-            config.DeltaRepeats = app.DeltaRepeats.Value;
-            config.DeltaDelay   = app.DeltaDelay.Value;
-            config.ChannelSets  = app.ChannelSets;
-            config.ChannelItems = app.ChannelListBox.Items;
-            
-            save(fullfile(path, file), 'config');
-            uialert(app.UIFigure, 'Configuration successfully saved.', 'Success');
-        end
-        
-        function loadConfig(app)
-            [file, path] = uigetfile('*.mat', 'Select Configuration File');
-            if file == 0; return; end
-            
-            try
-                data = load(fullfile(path, file), 'config');
-                c = data.config;
-                
-                app.AddrDelta.Value    = c.AddrDelta;
-                app.AddrSwitch.Value   = c.AddrSwitch;
-                app.AddrDaq.Value      = c.AddrDaq;
-                app.FieldStart.Value   = c.FieldStart;
-                app.FieldEnd.Value     = c.FieldEnd;
-                app.FieldDelay.Value   = c.FieldDelay;
-                app.FieldRepeats.Value = c.FieldRepeats;
-                
-                if isfield(c, 'FieldStepSize')
-                    app.FieldStepSize.Value = c.FieldStepSize;
-                end
-                
-                if isfield(c, 'FieldBackForth')
-                    app.FieldBackForth.Value = c.FieldBackForth;
-                end
-                
-                app.DeltaPosI.Value    = c.DeltaPosI;
-                app.DeltaNegI.Value    = c.DeltaNegI;
-                app.DeltaRepeats.Value = c.DeltaRepeats;
-                app.DeltaDelay.Value   = c.DeltaDelay;
-                
-                app.ChannelSets = c.ChannelSets;
-                app.ChannelListBox.Items = c.ChannelItems;
-                if ~isempty(app.ChannelListBox.Items)
-                    app.ChannelListBox.Value = app.ChannelListBox.Items{1};
-                end
-            catch ME
-                uialert(app.UIFigure, 'Failed to load configuration. File may be corrupted or invalid.', 'Load Error');
-            end
-        end
 
-        %% --- Hardware Connection & Disconnection Logic ---
-        
-        function disconnectHardware(app)
-            try
-                delete(app.Magnet);    app.Magnet = [];
-                delete(app.Switcher);  app.Switcher = [];
-                delete(app.DeltaMode); app.DeltaMode = [];
-            catch
-            end
-            
-            app.ConnectBtn.Text = 'Connect';
-            app.ConnectBtn.BackgroundColor = [0.96 0.96 0.96]; 
-            app.ConnectBtn.Enable = 'on';
-            app.DisconnectBtn.Enable = 'off';
-            app.RunBtn.Enable = 'off';
-        end
-        
+        %% --- Logic & Execution ---
         function connectHardware(app)
-            app.disconnectHardware();
             try
-                app.ConnectBtn.Text = 'Connecting...'; 
-                app.ConnectBtn.Enable = 'off'; drawnow;
+                app.ConnectBtn.Text = 'Connecting...'; drawnow;
                 
-                app.DeltaMode = Keithley.Keithley6221_2182A(app.AddrDelta.Value);
+                % Connect hardware[cite: 1, 2, 4]
+                app.M81       = Lakeshore.LakeshoreM81(app.AddrM81.Value, 1, 1);
                 app.Switcher  = Keithley.Keithley3706(app.AddrSwitch.Value);
-                app.Magnet    = NI.USB6002(app.AddrDaq.Value, 'ao0'); 
+                app.Magnet    = NI.USB6002(app.AddrDaq.Value, 'ao0');
                 
-                app.ConnectBtn.Text = 'Connected';
+                app.ConnectBtn.Text = 'Instruments Connected';
                 app.ConnectBtn.BackgroundColor = [0.2 0.8 0.2];
-                app.DisconnectBtn.Enable = 'on';
                 app.RunBtn.Enable = 'on';
             catch ME
-                app.disconnectHardware();
                 app.ConnectBtn.Text = 'Connection Failed';
                 app.ConnectBtn.BackgroundColor = [0.8 0.2 0.2];
                 uialert(app.UIFigure, ME.message, 'Hardware Connection Error');
             end
         end
-
-        %% --- List & File Logic ---
 
         function addChannelSet(app)
             vector = [app.ChanPosI.Value, app.ChanNegI.Value, app.ChanPosV.Value, app.ChanNegV.Value, 0, 0];
@@ -312,8 +212,6 @@ classdef DeltaSweepApp < handle
             app.IsRunning = false;
         end
         
-        %% --- Main Experiment Execution ---
-        
         function runExperiment(app)
             numChannels = length(app.ChannelSets);
             if numChannels == 0
@@ -331,21 +229,15 @@ classdef DeltaSweepApp < handle
             
             app.CurrentFile = app.resolveFilename(targetFile);
             
-            % 1. Open File and Write Metadata Header
+            % 1. Open File and Write Metadata Header[cite: 5]
             fileID = fopen(app.CurrentFile, 'w');
             
             fprintf(fileID, '%% Experiment Date: %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
-            fprintf(fileID, '%% Delta Current (+I): %e A\n', app.DeltaPosI.Value);
-            fprintf(fileID, '%% Delta Current (-I): %e A\n', app.DeltaNegI.Value);
-            fprintf(fileID, '%% Delta Averages (Repeats): %d\n', app.DeltaRepeats.Value);
-            fprintf(fileID, '%% Delta Delay: %f s\n', app.DeltaDelay.Value);
-            
-            % Document back and forth logic
-            if app.FieldBackForth.Value
-                fprintf(fileID, '%% Field Sweep: %f Oe to %f Oe AND BACK | Step Size: %f Oe\n', app.FieldStart.Value, app.FieldEnd.Value, app.FieldStepSize.Value);
-            else
-                fprintf(fileID, '%% Field Sweep: %f Oe to %f Oe | Step Size: %f Oe\n', app.FieldStart.Value, app.FieldEnd.Value, app.FieldStepSize.Value);
-            end
+            fprintf(fileID, '%% M81 Excitation Current: %e A\n', app.M81Current.Value);
+            fprintf(fileID, '%% M81 Frequency: %f Hz\n', app.M81Freq.Value);
+            fprintf(fileID, '%% M81 Mode: %s\n', app.M81Mode.Value);
+            fprintf(fileID, '%% Measurement Delay: %f s\n', app.M81Delay.Value);
+            fprintf(fileID, '%% Field Start: %f Oe | End: %f Oe | Steps: %d\n', app.FieldStart.Value, app.FieldEnd.Value, app.FieldSteps.Value);
             
             fprintf(fileID, '%% Channels Configured: ');
             for c = 1:numChannels
@@ -354,11 +246,11 @@ classdef DeltaSweepApp < handle
             end
             fprintf(fileID, '\n%%\n'); 
             
-            % 2. Build and Write Column Headers
+            % 2. Build and Write Column Headers[cite: 5]
             headerStr = 'SweepRepeat,Field_Oe';
             for c = 1:numChannels
                 vec = app.ChannelSets{c};
-                headerStr = sprintf('%s,%d_%d_%d_%d', headerStr, vec(1), vec(2), vec(3), vec(4));
+                headerStr = sprintf('%s,%d_%d_%d_%d_Ohms', headerStr, vec(1), vec(2), vec(3), vec(4));
             end
             fprintf(fileID, '%s\n', headerStr);
             
@@ -367,7 +259,7 @@ classdef DeltaSweepApp < handle
             app.RunBtn.Enable = 'off';
             app.StopBtn.Enable = 'on';
             
-            % Prepare Plot Lines
+            % Prepare Plot Lines[cite: 5]
             cla(app.PlotAxes);
             app.DataLines = {};
             colors = lines(numChannels);
@@ -376,39 +268,26 @@ classdef DeltaSweepApp < handle
             end
             legend(app.PlotAxes, app.ChannelListBox.Items, 'Location', 'best');
             
-            % =========================================================
-            % Generate Exact Step Sweep Vector
-            % =========================================================
-            startF = app.FieldStart.Value;
-            endF = app.FieldEnd.Value;
-            stepSize = abs(app.FieldStepSize.Value); % Ensure positive
-            
-            if startF == endF
-                fields = [startF];
-            elseif startF < endF
-                fields = startF : stepSize : endF;
+            % Setup M81 Hardware Parameters
+            if strcmp(app.M81Mode.Value, 'AC Lock-In')
+                app.M81.setSourceMode('AC', app.M81Current.Value, 0, app.M81Freq.Value);
+                app.M81.setMeasureMode('LIA');
+                app.M81.configureResistanceMode('4WIRE', 'AC');
             else
-                fields = startF : -stepSize : endF;
+                app.M81.setSourceMode('DC', app.M81Current.Value);
+                app.M81.setMeasureMode('DC');
+                app.M81.configureResistanceMode('4WIRE', 'DC');
             end
             
-            % Ensure the final point perfectly hits the exact End Value
-            if isempty(fields) || fields(end) ~= endF
-                fields(end+1) = endF; 
-            end
+            app.M81.setSourceRange('AUTO');
+            app.M81.setMeasureRange('AUTO');
+            app.M81.setOutputState(true);
             
-            % Append the reverse path if Back & Forth is selected
-            if app.FieldBackForth.Value
-                reverseFields = flip(fields(1:end-1));
-                fields = [fields, reverseFields];
-            end
-            
-            % HARDWARE SETUP: Configure and Arm Delta Mode ONCE
-            app.DeltaMode.setupDeltaMode(app.DeltaPosI.Value, app.DeltaNegI.Value, ...
-                                         app.DeltaRepeats.Value, 'oneshot', app.DeltaDelay.Value);
-            app.DeltaMode.armDeltaMode();
+            % Generate Sweep Vector
+            fields = linspace(app.FieldStart.Value, app.FieldEnd.Value, app.FieldSteps.Value);
             
             try
-                % Main Experiment Loop
+                % Main Experiment Loop[cite: 5]
                 for rep = 1:app.FieldRepeats.Value
                     for i = 1:length(fields)
                         if ~app.IsRunning; break; end 
@@ -417,27 +296,24 @@ classdef DeltaSweepApp < handle
                         app.Magnet.setField(currentField);
                         pause(app.FieldDelay.Value); 
                         
-                        stepVoltages = zeros(1, numChannels);
+                        stepResistances = zeros(1, numChannels);
                         
                         for c = 1:numChannels
                             if ~app.IsRunning; break; end
                             
-                            % Close routing matrix
                             app.Switcher.closeChannels(app.ChannelSets{c});
-                            pause(0.2); 
+                            pause(app.M81Delay.Value); % Settle time for locks/filters
                             
-                            % Trigger the already armed Delta Mode
-                            measV = app.DeltaMode.runDeltaMeasurement();
-                            stepVoltages(c) = measV;
+                            measR = app.M81.readResistance();[cite: 1]
+                            stepResistances(c) = measR;
                             
-                            addpoints(app.DataLines{c}, currentField, measV);
+                            addpoints(app.DataLines{c}, currentField, measR);
                         end
                         
-                        % Write completed row safely
                         if app.IsRunning
                             fprintf(fileID, '%d,%f', rep, currentField);
                             for c = 1:numChannels
-                                fprintf(fileID, ',%e', stepVoltages(c));
+                                fprintf(fileID, ',%e', stepResistances(c));
                             end
                             fprintf(fileID, '\n');
                         end
@@ -446,15 +322,15 @@ classdef DeltaSweepApp < handle
                     end
                 end
                 
-                % Safely spin down the hardware
-                app.DeltaMode.disarmDeltaMode();
+                % Safe shutdown
                 app.Magnet.setField(0);
                 app.Switcher.openAllChannels();
+                app.M81.setOutputState(false);
                 
             catch ME
-                app.DeltaMode.disarmDeltaMode();
                 app.Magnet.setField(0);
                 app.Switcher.openAllChannels();
+                app.M81.setOutputState(false);
                 fclose(fileID);
                 app.IsRunning = false;
                 app.RunBtn.Enable = 'on';
