@@ -58,22 +58,25 @@ classdef Lakeshore335 < handle
                     obj.unlockKeypad();       % Remove software keypad lock
                 catch
                 end
-                clear obj.VisaObj;
-                fprintf('Lake Shore 335 connection closed cleanly.\n');
+                
+                % Force MATLAB to release the VISA handle completely
+                delete(obj.VisaObj);
+                obj.VisaObj = []; 
+                fprintf('Lake Shore 335 connection closed cleanly (VISA session destroyed).\n');
             end
         end
 
         %% --- KEYPAD LOCK / UNLOCK ---
         function unlockKeypad(obj)
-            % Disable keypad lockout on the 335 front panel
+            % Disable keypad lockout on the 335 front panel using default 3-digit code
             if obj.IsSimulated; return; end
-            writeline(obj.VisaObj, 'LOCK 0,0');
+            writeline(obj.VisaObj, 'LOCK 0,000');
         end
         
         function lockKeypad(obj)
             % Fully lock front panel keypad
             if obj.IsSimulated; return; end
-            writeline(obj.VisaObj, 'LOCK 1,0');
+            writeline(obj.VisaObj, 'LOCK 1,000');
         end
         
         %% --- TEMPERATURE READOUTS ---
@@ -125,9 +128,6 @@ classdef Lakeshore335 < handle
         %% --- PT1000 / SENSOR CONFIGURATION ---
         function configurePT1000(obj, inputChan, curveNum)
             % Configure input channel for a Platinum PT1000 RTD sensor.
-            % INTYPE params: <input>, <sensor_type=3 (Platinum RTD)>, <autorange=1>, 
-            %                <range=0>, <compensation=1 (on)>, <units=1 (Kelvin)>
-            % Standard Lake Shore DIN 43760 PT1000 curve is typically Curve 7.
             if nargin < 2; inputChan = obj.DefaultInput; end
             if nargin < 3; curveNum = 7; end % Default factory PT1000 curve
             
@@ -144,7 +144,6 @@ classdef Lakeshore335 < handle
         end
         
         function setCustomCurve(obj, inputChan, curveNumber)
-            % Assign a specific curve number (0=None, 1-7=Standard, 21-59=User curves)
             if nargin < 2; inputChan = obj.DefaultInput; end
             if obj.IsSimulated; return; end
             writeline(obj.VisaObj, sprintf('INCRV %s,%d', upper(char(inputChan)), curveNumber));
@@ -152,51 +151,38 @@ classdef Lakeshore335 < handle
         
         %% --- SETPOINT & RAMP CONTROL ---
         function setSetpoint(obj, targetTempK, loopNum)
-            % Set target setpoint in Kelvin
             if nargin < 3; loopNum = obj.DefaultLoop; end
-            
             if obj.IsSimulated
                 obj.SimSetpoint = targetTempK;
                 return;
             end
-            
             writeline(obj.VisaObj, sprintf('SETP %d,%g', loopNum, targetTempK));
         end
         
         function spVal = getSetpoint(obj, loopNum)
-            % Query the active setpoint for a given loop
             if nargin < 2; loopNum = obj.DefaultLoop; end
-            
             if obj.IsSimulated; spVal = obj.SimSetpoint; return; end
             spVal = str2double(writeread(obj.VisaObj, sprintf('SETP? %d', loopNum)));
         end
         
         function setRamp(obj, enable, rateKPerMin, loopNum)
-            % Set ramp rate in Kelvin/minute and toggle ramping
-            % enable: boolean (true/false) or (1/0)
-            % rateKPerMin: rate in K/min (0.1 to 100.0)
             if nargin < 4; loopNum = obj.DefaultLoop; end
-            
             enableState = double(enable);
             if obj.IsSimulated
                 obj.SimRamping = (enableState == 1);
                 obj.SimRampRate = rateKPerMin;
                 return;
             end
-            
             writeline(obj.VisaObj, sprintf('RAMP %d,%d,%g', loopNum, enableState, rateKPerMin));
         end
         
         function [isEnabled, rateVal] = getRamp(obj, loopNum)
-            % Query ramp parameter status and rate
             if nargin < 2; loopNum = obj.DefaultLoop; end
-            
             if obj.IsSimulated
                 isEnabled = obj.SimRamping;
                 rateVal = obj.SimRampRate;
                 return;
             end
-            
             resp = strtrim(writeread(obj.VisaObj, sprintf('RAMP? %d', loopNum)));
             tokens = sscanf(resp, '%d,%f');
             isEnabled = logical(tokens(1));
@@ -204,23 +190,15 @@ classdef Lakeshore335 < handle
         end
         
         function isRampActive = isRamping(obj, loopNum)
-            % Check if the loop is actively ramping to a setpoint
             if nargin < 2; loopNum = obj.DefaultLoop; end
-            
             if obj.IsSimulated; isRampActive = obj.SimRamping; return; end
-            
             statusVal = str2double(writeread(obj.VisaObj, sprintf('RAMPST? %d', loopNum)));
             isRampActive = (statusVal == 1);
         end
         
         %% --- HEATER & PID CONTROL ---
         function setHeaterRange(obj, rangeVal, loopNum)
-            % Set output heater range:
-            % Loop 1 (Heater Output): 0 = Off, 1 = Low, 2 = Medium, 3 = High
-            % Loop 2 (Analog Output): 0 = Off, 1 = On (or 0-3 depending on power supply option)
-            % Accepts numeric index or string ('OFF', 'LOW', 'MED', 'HIGH')
             if nargin < 3; loopNum = obj.DefaultLoop; end
-            
             if ischar(rangeVal) || isstring(rangeVal)
                 switch upper(char(rangeVal))
                     case 'OFF';  rangeVal = 0;
@@ -236,7 +214,6 @@ classdef Lakeshore335 < handle
                 obj.SimHeaterRange = rangeVal;
                 return;
             end
-            
             writeline(obj.VisaObj, sprintf('RANGE %d,%d', loopNum, rangeVal));
         end
         
@@ -247,81 +224,40 @@ classdef Lakeshore335 < handle
         end
         
         function htrPercent = getHeaterOutput(obj, outputNum)
-            % Read current heater output percentage (HTR?)
             if nargin < 2; outputNum = 1; end
-            
             if obj.IsSimulated; htrPercent = 25.4 + randn()*0.5; return; end
             htrPercent = str2double(writeread(obj.VisaObj, sprintf('HTR? %d', outputNum)));
         end
         
         function setPID(obj, P, I, D, loopNum)
-            % Set PID tuning parameters for a closed loop
-            % P: Gain (0.1 to 1000)
-            % I: Integral reset (0.1 to 1000 s)
-            % D: Derivative rate (0 to 200 s)
             if nargin < 5; loopNum = obj.DefaultLoop; end
             if obj.IsSimulated; return; end
-            
             writeline(obj.VisaObj, sprintf('PID %d,%g,%g,%g', loopNum, P, I, D));
         end
         
         function [P, I, D] = getPID(obj, loopNum)
             if nargin < 2; loopNum = obj.DefaultLoop; end
             if obj.IsSimulated; P = 50; I = 20; D = 0; return; end
-            
             resp = strtrim(writeread(obj.VisaObj, sprintf('PID? %d', loopNum)));
             tokens = sscanf(resp, '%f,%f,%f');
             P = tokens(1); I = tokens(2); D = tokens(3);
         end
         
         function configureLoopMode(obj, loopNum, modeType, inputChan)
-            % Set output mode:
-            % modeType: 0=Off, 1=Closed Loop PID, 2=Zone, 3=Open Loop
-            % inputChan: 'A' or 'B' (or 1/2)
             if nargin < 4; inputChan = obj.DefaultInput; end
-            
             if ischar(inputChan) || isstring(inputChan)
                 if strcmpi(inputChan, 'A'); inCode = 1; else; inCode = 2; end
             else
                 inCode = inputChan;
             end
-            
             if obj.IsSimulated; return; end
-            % OUTMODE: <loop>, <mode>, <input>, <powerup_enable=0>
             writeline(obj.VisaObj, sprintf('OUTMODE %d,%d,%d,0', loopNum, modeType, inCode));
         end
         
         function setManualOutput(obj, powerPercent, loopNum)
-            % Set manual heater output (0 - 100%) for open loop operation
             if nargin < 3; loopNum = obj.DefaultLoop; end
             if obj.IsSimulated; return; end
             writeline(obj.VisaObj, sprintf('MOUT %d,%g', loopNum, powerPercent));
-        end
-        
-        %% --- UTILITY / AUTOMATION HELPERS ---
-        function isStable = waitForTemperature(obj, targetTempK, tolK, timeoutSec, inputChan)
-            % Blocking helper: waits until the temperature stays within [target - tol, target + tol]
-            if nargin < 3; tolK = 0.2; end
-            if nargin < 4; timeoutSec = 300; end
-            if nargin < 5; inputChan = obj.DefaultInput; end
-            
-            t0 = tic;
-            isStable = false;
-            stableCount = 0;
-            
-            while toc(t0) < timeoutSec
-                currentTemp = obj.readTemp(inputChan);
-                if abs(currentTemp - targetTempK) <= tolK
-                    stableCount = stableCount + 1;
-                    if stableCount >= 5 % Sustained inside tolerance for 5 checks
-                        isStable = true;
-                        return;
-                    end
-                else
-                    stableCount = 0;
-                end
-                pause(1.0);
-            end
         end
     end
 end

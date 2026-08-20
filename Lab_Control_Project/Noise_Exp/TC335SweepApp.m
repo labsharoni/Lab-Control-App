@@ -332,30 +332,30 @@ classdef TC335SweepApp < handle
         end
         
         function closeApp(app)
-            % 1. Stop and delete polling timer first so no new queries are sent
-            if ~isempty(app.PollTimer) && isvalid(app.PollTimer)
-                stop(app.PollTimer);
-                delete(app.PollTimer);
+            % 1. Brute-force stop ALL MATLAB timers
+            timers = timerfindall;
+            if ~isempty(timers)
+                stop(timers);
+                delete(timers);
             end
             
             % 2. Close logging file if open
             if app.FileID ~= -1
-                fclose(app.FileID);
+                try fclose(app.FileID); catch; end
             end
             
-            % 3. Safely shut down heaters and close VISA object
+            % 3. Safely shut down heaters and explicitly close VISA object
             if ~isempty(app.TC) && isvalid(app.TC)
-                try
-                    app.TC.unlockKeypad();
-                catch
-                end
-                delete(app.TC);
+                delete(app.TC); 
             end
+            app.TC = []; % Obliterate the hardware object reference
             
-            % 4. Force release any remaining VISA handles to this address
+            % 4. Force release ANY lingering VISA connections in MATLAB
             try
-                existing = visadevfind("ResourceName", app.AddrTC.Value);
-                if ~isempty(existing); delete(existing); end
+                existing = visadevfind;
+                if ~isempty(existing)
+                    delete(existing); 
+                end
             catch
             end
             
