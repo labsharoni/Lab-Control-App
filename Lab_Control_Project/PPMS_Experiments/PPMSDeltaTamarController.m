@@ -15,6 +15,14 @@ classdef PPMSDeltaTamarController < handle
         IsRunning = false
     end
 
+    properties (Constant, Access = private)
+        % Staged cool-down (main-window checkbox): stop at StageTempK, hold
+        % StageHoldSec, then go lower at no more than StageMaxRate K/min.
+        StageTempK = 10
+        StageHoldSec = 30 * 60
+        StageMaxRate = 2
+    end
+
     properties (Access = private)
         AddrPPMS, AddrDelta, AddrSwitch
         ConnectBtn, DisconnectBtn
@@ -26,6 +34,7 @@ classdef PPMSDeltaTamarController < handle
         AddExperimentBtn, LoadExperimentBtn, RemoveExperimentBtn, MoveUpBtn, MoveDownBtn
         RenameExperimentBtn, DuplicateExperimentBtn
         ShutdownCheckbox
+        StagedCooldownCheckbox
         HeliumThresholdEdit
         RunBtn, StopBtn
         HeliumTimer
@@ -144,7 +153,10 @@ classdef PPMSDeltaTamarController < handle
         end
 
         function createRunPanel(app, parent)
-            g = uigridlayout(parent, [2, 1], 'RowHeight', {'fit', 'fit'});
+            g = uigridlayout(parent, [3, 1], 'RowHeight', {'fit', 'fit', 'fit'});
+
+            app.StagedCooldownCheckbox = uicheckbox(g, 'Value', false, ...
+                'Text', 'Below 10 K: stop at 10 K for 30 min, then max 2 K/min');
 
             thresholdRow = uigridlayout(g, [1, 2], 'ColumnWidth', {'1x', 80});
             uilabel(thresholdRow, 'Text', 'Helium Shutdown Threshold (%):');
@@ -447,6 +459,72 @@ classdef PPMSDeltaTamarController < handle
             app.StopBtn.Enable = 'off';
         end
 
+        %% --- Temperature Moves (not measured) ---
+        % With the staged cool-down option on, going from above 10 K to below
+        % it stops at 10 K (requested rate), holds there for 30 min, then
+        % continues at no more than 2 K/min. Moves that stay below 10 K are
+        % also limited to 2 K/min.
+        function goToTemperature(app, target, rate, approach)
+            if ~app.StagedCooldownCheckbox.Value || target >= app.StageTempK
+                app.setTemperatureAndWait(target, rate, approach);
+                return;
+            end
+
+            lowRate = min(rate, app.StageMaxRate);
+            [currentTemp, ~] = app.PPMS.getCurrentTemperature();
+            if currentTemp > app.StageTempK + 0.5
+                app.logMessage(sprintf('Staged cool-down: to %.1f K at %.1f K/min, hold %d min, then to %.2f K at %.1f K/min.', ...
+                    app.StageTempK, rate, app.StageHoldSec / 60, target, lowRate));
+                app.setTemperatureAndWait(app.StageTempK, rate, approach);
+                app.holdFor(app.StageHoldSec, sprintf('Holding at %.1f K', app.StageTempK));
+            end
+            app.setTemperatureAndWait(target, lowRate, approach);
+        end
+
+        function addStagedCooldownNote(app, rec)
+            % Data-file note, only when the option is on for this run.
+            if app.StagedCooldownCheckbox.Value
+                rec.addMetadata(['Staged cool-down ON: crossing below %.0f K stops at %.0f K and waits %d min ', ...
+                    '(measured temperature sweeps keep recording during the wait, same Repetition number), ', ...
+                    'then continues at max %.0f K/min'], app.StageTempK, app.StageTempK, app.StageHoldSec / 60, app.StageMaxRate);
+            end
+        end
+
+        function setTemperatureAndWait(app, target, rate, approach)
+            % Done when the PPMS reports the temperature as reached and the
+            % reading is near the target (guards against a stale "Stable"
+            % status right after the new setpoint).
+            tolK = max(0.5, 0.02 * target);
+            app.PPMS.setTemperature(target, rate, approach);
+            pause(5);
+            while app.IsRunning
+                [currentTemp, ~] = app.PPMS.getCurrentTemperature();
+                if abs(currentTemp - target) < tolK && app.PPMS.waitConditionReached(true, false, false, false)
+                    break;
+                end
+                pause(1);
+            end
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+        end
+
+        function holdFor(app, seconds, label)
+            % Waits in 1 s steps so STOP still works; logs every 5 minutes.
+            holdTimer = tic;
+            nextLog = 0;
+            while app.IsRunning && toc(holdTimer) < seconds
+                if toc(holdTimer) >= nextLog
+                    app.logMessage(sprintf('%s: %.0f min left.', label, (seconds - toc(holdTimer)) / 60));
+                    nextLog = nextLog + 300;
+                end
+                pause(1);
+            end
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+        end
+
         %% --- Experiment Execution: Field Sweep ---
         function runFieldSweepExperiment(app, def)
             if isempty(app.PPMS) || isempty(app.DeltaMode) || isempty(app.Switcher)
@@ -502,6 +580,7 @@ classdef PPMSDeltaTamarController < handle
             rec.addMetadata('PPMS Sweep: %f Oe to %f Oe at %f Oe/sec', p.StartField, p.EndField, p.Rate);
             rec.addMetadata('Repetitions: %d | Back-and-forth: %d', def.Repeat.Repetitions, def.Repeat.BackAndForth);
             rec.addMetadata('Start from zero: %d (Repetition 0 = 0 Oe to start field)', fromZero);
+            app.addStagedCooldownNote(rec);
 
             headerParts = {'Time_s', 'Repetition'};
             for c = 1:numChannels
@@ -538,16 +617,7 @@ classdef PPMSDeltaTamarController < handle
             app.DeltaMode.armDeltaMode();
 
             app.logMessage(sprintf('Setting static temperature to %.2f K (Rate: %.1f K/min, Mode: %s)...', staticTemp, tempRate, tempApproach));
-            app.PPMS.setTemperature(staticTemp, tempRate, tempApproach);
-            while app.IsRunning
-                if app.PPMS.waitConditionReached(true, false, false, false)
-                    break;
-                end
-                pause(1);
-            end
-            if ~app.IsRunning
-                throw(MException('App:UserStop', 'Stopped by user.'));
-            end
+            app.goToTemperature(staticTemp, tempRate, tempApproach);
             app.logMessage(sprintf('Temperature stabilized at %.2f K.', staticTemp));
 
             app.logMessage(sprintf('Setting static angle to %.2f deg...', staticAngle));
@@ -800,6 +870,7 @@ classdef PPMSDeltaTamarController < handle
             rec.addMetadata('Ramp to Start: %f K/min (%s)', approachRate, approachMode);
             rec.addMetadata('PPMS Sweep: %f K to %f K at %f K/min (%s)', p.StartTemp, p.EndTemp, p.Rate, sweepMode);
             rec.addMetadata('Repetitions: %d | Back-and-forth: %d', totalReps, backForth);
+            app.addStagedCooldownNote(rec);
 
             headerParts = {'Time_s', 'Repetition'};
             for c = 1:numChannels
@@ -866,17 +937,7 @@ classdef PPMSDeltaTamarController < handle
             app.logMessage(sprintf('Magnetic field stabilized at %.1f Oe.', staticField));
 
             app.logMessage(sprintf('Ramping to start temperature (%.2f K, %.1f K/min, %s)...', p.StartTemp, approachRate, approachMode));
-            app.PPMS.setTemperature(p.StartTemp, approachRate, approachMode);
-            pause(5);
-            while app.IsRunning
-                if app.PPMS.waitConditionReached(true, false, false, false)
-                    break;
-                end
-                pause(1);
-            end
-            if ~app.IsRunning
-                throw(MException('App:UserStop', 'Stopped by user.'));
-            end
+            app.goToTemperature(p.StartTemp, approachRate, approachMode);
             app.logMessage(sprintf('Temperature stabilized at %.2f K.', p.StartTemp));
 
             turnaroundSettleSec = 60;
@@ -928,21 +989,66 @@ classdef PPMSDeltaTamarController < handle
         end
 
         function runTemperatureSweepLeg(app, rec, dataLines, def, targetTemp, rate, approachMode, interval, legLabel, repIndex, expStartTimer)
-            numChannels = length(def.ChannelSets);
+            % With the staged cool-down option on, a cooling leg that crosses
+            % 10 K stops there, keeps measuring through the 30 min hold (same
+            % Repetition number), then continues at no more than 2 K/min.
+            [currentTemp, ~] = app.PPMS.getCurrentTemperature();
+            staged = app.StagedCooldownCheckbox.Value && targetTemp < app.StageTempK ...
+                && currentTemp > app.StageTempK + 0.5;
+            counts = [0 0];   % [intervals over budget, worst overrun (s)]
 
-            % A leg ends when the PPMS reports the temperature as reached and
-            % we are near the target, or we are within a tight tolerance of it.
-            % The distance check stops a stale "Stable" status right after
-            % setTemperature from ending the leg immediately.
-            nearTolK = 0.5;
-            tightTolK = 0.05;
+            if staged
+                lowRate = min(rate, app.StageMaxRate);
+                app.logMessage(sprintf('%s: sweeping to %.1f K at %.2f K/min (staged cool-down)...', legLabel, app.StageTempK, rate));
+                counts = app.sweepTemperatureMeasuring(rec, dataLines, def, app.StageTempK, rate, approachMode, ...
+                    interval, repIndex, expStartTimer, counts);
 
-            app.logMessage(sprintf('%s: sweeping to %.2f K at %.2f K/min...', legLabel, targetTemp, rate));
+                app.logMessage(sprintf('%s: holding at %.1f K for %d min (still measuring)...', legLabel, app.StageTempK, app.StageHoldSec / 60));
+                holdTimer = tic;
+                counts = app.measureTemperatureUntil(rec, dataLines, def, interval, repIndex, expStartTimer, counts, ...
+                    @() toc(holdTimer) >= app.StageHoldSec);
+
+                app.logMessage(sprintf('%s: hold done, sweeping to %.2f K at %.2f K/min...', legLabel, targetTemp, lowRate));
+                counts = app.sweepTemperatureMeasuring(rec, dataLines, def, targetTemp, lowRate, approachMode, ...
+                    interval, repIndex, expStartTimer, counts);
+            else
+                app.logMessage(sprintf('%s: sweeping to %.2f K at %.2f K/min...', legLabel, targetTemp, rate));
+                counts = app.sweepTemperatureMeasuring(rec, dataLines, def, targetTemp, rate, approachMode, ...
+                    interval, repIndex, expStartTimer, counts);
+            end
+
+            if counts(1) > 0
+                app.logMessage(sprintf(['%s: %d interval(s) ran over the %.1fs budget ', ...
+                    '(worst overrun: %.1fs). Measurement is taking longer than the configured interval.'], ...
+                    legLabel, counts(1), interval, counts(2)));
+            end
+
+            app.logMessage(sprintf('%s complete.', legLabel));
+        end
+
+        function counts = sweepTemperatureMeasuring(app, rec, dataLines, def, targetTemp, rate, approachMode, interval, repIndex, expStartTimer, counts)
             app.PPMS.setTemperature(targetTemp, rate, approachMode);
             pause(2);
+            counts = app.measureTemperatureUntil(rec, dataLines, def, interval, repIndex, expStartTimer, counts, ...
+                @() app.temperatureReached(targetTemp));
+        end
 
-            overrunCount = 0;
-            worstOverrun = 0;
+        function done = temperatureReached(app, targetTemp)
+            % Reached when the PPMS says so and we are near the target, or when
+            % we are within a tight tolerance of it. The distance check stops a
+            % stale "Stable" status right after setTemperature from ending a
+            % sweep immediately.
+            nearTolK = 0.5;
+            tightTolK = 0.05;
+            [currentTemp, ~] = app.PPMS.getCurrentTemperature();
+            distance = abs(currentTemp - targetTemp);
+            done = distance < tightTolK || ...
+                (distance < nearTolK && app.PPMS.waitConditionReached(true, false, false, false));
+        end
+
+        function counts = measureTemperatureUntil(app, rec, dataLines, def, interval, repIndex, expStartTimer, counts, isDone)
+            % Records one row per interval until isDone() returns true.
+            numChannels = length(def.ChannelSets);
 
             while app.IsRunning
                 loopTimer = tic;
@@ -985,10 +1091,7 @@ classdef PPMSDeltaTamarController < handle
                     rec.addRow([toc(expStartTimer), repIndex, reshape([stepTemps; stepValues], 1, [])]);
                 end
 
-                [currentTemp, ~] = app.PPMS.getCurrentTemperature();
-                distance = abs(currentTemp - targetTemp);
-                if distance < tightTolK || ...
-                        (distance < nearTolK && app.PPMS.waitConditionReached(true, false, false, false))
+                if isDone()
                     break;
                 end
 
@@ -997,8 +1100,7 @@ classdef PPMSDeltaTamarController < handle
                 if remainingWait > 0
                     pause(remainingWait);
                 else
-                    overrunCount = overrunCount + 1;
-                    worstOverrun = max(worstOverrun, -remainingWait);
+                    counts = [counts(1) + 1, max(counts(2), -remainingWait)];
                     drawnow;
                 end
             end
@@ -1006,14 +1108,6 @@ classdef PPMSDeltaTamarController < handle
             if ~app.IsRunning
                 throw(MException('App:UserStop', 'Stopped by user.'));
             end
-
-            if overrunCount > 0
-                app.logMessage(sprintf(['%s: %d interval(s) ran over the %.1fs budget ', ...
-                    '(worst overrun: %.1fs). Measurement is taking longer than the configured interval.'], ...
-                    legLabel, overrunCount, interval, worstOverrun));
-            end
-
-            app.logMessage(sprintf('%s complete.', legLabel));
         end
 
         %% --- Experiment Execution: Angle Sweep ---
@@ -1111,6 +1205,7 @@ classdef PPMSDeltaTamarController < handle
             rec.addMetadata('Delta Repeats: %d | Delay: %f s | Range: %s', repeats, delay, vRange);
             rec.addMetadata('Static Temperature: %f K (Rate: %f K/min, Approach: %s) | Static Field: %f Oe', staticTemp, tempRate, tempApproach, staticField);
             rec.addMetadata('Rotator Sweep: %f deg to %f deg (Step: %f deg, Speed: %f deg/sec)', startAngle, endAngle, stepAngle, sweepRate);
+            app.addStagedCooldownNote(rec);
 
             headerParts = {'Time_s', 'Repetition', 'Angle_deg'};
             for c = 1:numChannels
@@ -1148,14 +1243,7 @@ classdef PPMSDeltaTamarController < handle
             app.DeltaMode.armDeltaMode();
         
             app.logMessage(sprintf('Setting static temperature to %.2f K (Rate: %.1f K/min, Mode: %s)...', staticTemp, tempRate, tempApproach));
-            app.PPMS.setTemperature(staticTemp, tempRate, tempApproach);
-            while app.IsRunning
-                if app.PPMS.waitConditionReached(true, false, false, false)
-                    break;
-                end
-                pause(1);
-            end
-            if ~app.IsRunning; throw(MException('App:UserStop', 'Stopped by user.')); end
+            app.goToTemperature(staticTemp, tempRate, tempApproach);
             app.logMessage(sprintf('Temperature stabilized at %.2f K.', staticTemp));
         
             app.logMessage(sprintf('Setting static magnetic field to %.1f Oe...', staticField));
